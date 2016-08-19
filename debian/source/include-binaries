@@ -3,6 +3,7 @@ cs_unittest/model-sets/8.0.0_ok.model
 cs_unittest/model-sets/8.0.1_hash_ok.model
 cs_unittest/model-sets/8.0.1_rcv1_ok.model
 cs_unittest/model-sets/8.0.1.test_named_ok.model
+explore/mwt.chm
 test/train-sets/dictionary_test.dict.gz
 test/train-sets/ner.test.gz
 test/train-sets/ner.train.gz
