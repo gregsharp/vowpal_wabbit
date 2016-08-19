@@ -10,6 +10,7 @@ license as described in the file LICENSE.
 //#include <boost/filesystem.hpp>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <algorithm>
 
 #include "parse_regressor.h"
 #include "parser.h"
@@ -31,6 +32,9 @@ license as described in the file LICENSE.
 #include "csoaa.h"
 #include "cb_algs.h"
 #include "cb_adf.h"
+#include "cb_explore.h"
+#include "cb_explore_adf.h"
+#include "mwt.h"
 #include "confidence.h"
 #include "scorer.h"
 #include "expreplay.h"
@@ -50,6 +54,7 @@ license as described in the file LICENSE.
 #include "lrqfa.h"
 #include "autolink.h"
 #include "log_multi.h"
+#include "recall_tree.h"
 #include "stagewise_poly.h"
 #include "active.h"
 #include "active_cover.h"
@@ -61,6 +66,8 @@ license as described in the file LICENSE.
 #include "accumulate.h"
 #include "vw_validate.h"
 #include "vw_allreduce.h"
+#include "OjaNewton.h"
+#include "audit_regressor.h"
 
 using namespace std;
 //
@@ -160,12 +167,14 @@ void parse_dictionary_argument(vw&all, string str)
       return;
     }
 
-  feature_dict* map = new feature_dict(1023, nullptr, substring_equal);
-
-  example *ec = VW::alloc_examples(all.p->lp.label_size, 1);
   fd = io->open_file(fname.c_str(), all.stdin_off, io_buf::READ);
   if (fd < 0)
+  { delete io;
     THROW("error: cannot re-read dictionary from file '" << fname << "'" << ", opening failed");
+  }
+
+  feature_dict* map = new feature_dict(1023, nullptr, substring_equal);
+  example *ec = VW::alloc_examples(all.p->lp.label_size, 1);
 
   size_t def = (size_t)' ';
 
@@ -181,7 +190,13 @@ void parse_dictionary_argument(vw&all, string str)
       { size *= 2;
         buffer = (char*)realloc(buffer, size);
         if (buffer == nullptr)
+        { free(ec);
+          VW::dealloc_example(all.p->lp.delete_label, *ec);
+          delete map;
+          io->close_file();
+          delete io;
           THROW("error: memory allocation failed in reading dictionary");
+        }
       }
     }
     while ( (rc != EOF) && (rc != '\n') && (nread > 0) );
@@ -197,7 +212,7 @@ void parse_dictionary_argument(vw&all, string str)
     char* word = calloc_or_throw<char>(d-c);
     memcpy(word, c, d-c);
     substring ss = { word, word + (d - c) };
-    uint32_t hash = uniform_hash( ss.begin, ss.end-ss.begin, quadratic_constant);
+    uint64_t hash = uniform_hash( ss.begin, ss.end-ss.begin, quadratic_constant);
     if (map->get(ss, hash) != nullptr)   // don't overwrite old values!
     { free(word);
       continue;
@@ -206,18 +221,17 @@ void parse_dictionary_argument(vw&all, string str)
     *d = '|';  // set up for parser::read_line
     VW::read_line(all, ec, d);
     // now we just need to grab stuff from the default namespace of ec!
-    if (ec->atomics[def].size() == 0)
+    if (ec->feature_space[def].size() == 0)
     { free(word);
       continue;
     }
-    v_array<feature>* arr = new v_array<feature>;
-    *arr = v_init<feature>();
-    push_many(*arr, ec->atomics[def].begin, ec->atomics[def].size());
+    features* arr = new features;
+    arr->deep_copy_from(ec->feature_space[def]);
     map->put(ss, hash, arr);
 
     // clear up ec
     ec->tag.erase(); ec->indices.erase();
-    for (size_t i=0; i<256; i++) { ec->atomics[i].erase(); ec->audit_features[i].erase(); }
+    for (size_t i=0; i<256; i++) { ec->feature_space[i].erase();}
   }
   while ((rc != EOF) && (nread > 0));
   free(buffer);
@@ -241,31 +255,38 @@ void parse_affix_argument(vw&all, string str)
   strcpy(cstr, str.c_str());
 
   char*p = strtok(cstr, ",");
-  while (p != 0)
-  { char*q = p;
-    uint16_t prefix = 1;
-    if (q[0] == '+') { q++; }
-    else if (q[0] == '-') { prefix = 0; q++; }
-    if ((q[0] < '1') || (q[0] > '7'))
-      THROW("malformed affix argument (length must be 1..7): " << p);
 
-    uint16_t len = (uint16_t)(q[0] - '0');
-    uint16_t ns = (uint16_t)' ';  // default namespace
-    if (q[1] != 0)
-    { if (valid_ns(q[1]))
-        ns = (uint16_t)q[1];
-      else
-        THROW("malformed affix argument (invalid namespace): " << p);
+  try
+  { while (p != 0)
+    { char*q = p;
+      uint16_t prefix = 1;
+      if (q[0] == '+') { q++; }
+      else if (q[0] == '-') { prefix = 0; q++; }
+      if ((q[0] < '1') || (q[0] > '7'))
+        THROW("malformed affix argument (length must be 1..7): " << p);
 
-      if (q[2] != 0)
-        THROW("malformed affix argument (too long): " << p);
+      uint16_t len = (uint16_t)(q[0] - '0');
+      uint16_t ns = (uint16_t)' ';  // default namespace
+      if (q[1] != 0)
+      { if (valid_ns(q[1]))
+          ns = (uint16_t)q[1];
+        else
+          THROW("malformed affix argument (invalid namespace): " << p);
+
+        if (q[2] != 0)
+          THROW("malformed affix argument (too long): " << p);
+      }
+
+      uint16_t afx = (len << 1) | (prefix & 0x1);
+      all.affix_features[ns] <<= 4;
+      all.affix_features[ns] |=  afx;
+
+      p = strtok(nullptr, ",");
     }
-
-    uint16_t afx = (len << 1) | (prefix & 0x1);
-    all.affix_features[ns] <<= 4;
-    all.affix_features[ns] |=  afx;
-
-    p = strtok(nullptr, ",");
+  }
+  catch(...)
+  { free(cstr);
+    throw;
   }
 
   free(cstr);
@@ -400,7 +421,64 @@ void parse_source(vw& all)
 }
 
 bool interactions_settings_doubled = false; // local setting setted in parse_modules()
+namespace VW
+{
+const char* are_features_compatible(vw& vw1, vw& vw2)
+{ if (vw1.p->hasher != vw2.p->hasher)
+    return "hasher";
 
+  if (!equal(vw1.spelling_features, vw1.spelling_features + (sizeof(vw1.spelling_features) / sizeof(bool)), vw2.spelling_features))
+    return "spelling_features";
+
+  if (!equal(vw1.affix_features, vw1.affix_features + (sizeof(vw1.affix_features) / sizeof(uint32_t)), vw2.affix_features))
+    return "affix_features";
+
+  if (!equal(vw1.ngram, vw1.ngram + (sizeof(vw1.ngram) / sizeof(uint32_t)), vw2.ngram))
+    return "ngram";
+
+  if (!equal(vw1.skips, vw1.skips + (sizeof(vw1.skips) / sizeof(uint32_t)), vw2.skips))
+    return "skips";
+
+  if (!equal(vw1.limit, vw1.limit + (sizeof(vw1.limit) / sizeof(uint32_t)), vw2.limit))
+    return "limit";
+
+  if (vw1.num_bits != vw2.num_bits)
+    return "num_bits";
+
+  if (vw1.permutations != vw1.permutations)
+    return "permutations";
+
+  if (vw1.interactions.size() != vw2.interactions.size())
+    return "interactions size";
+
+  if (vw1.ignore_some != vw2.ignore_some)
+    return "ignore_some";
+
+  if (vw1.ignore_some && !equal(vw1.ignore, vw1.ignore + (sizeof(vw1.ignore) / sizeof(bool)), vw2.ignore))
+    return "ignore";
+
+  if (vw1.redefine_some != vw2.redefine_some)
+    return "redefine_some";
+
+  if (vw1.redefine_some && !equal(vw1.redefine, vw1.redefine + (sizeof(vw1.redefine) / sizeof(unsigned char)), vw2.redefine))
+    return "redefine";
+
+  if (vw1.add_constant != vw2.add_constant)
+    return "add_constant";
+
+  if (vw1.dictionary_path.size() != vw2.dictionary_path.size())
+    return "dictionary_path size";
+
+  if (!equal(vw1.dictionary_path.begin(), vw1.dictionary_path.end(), vw2.dictionary_path.begin()))
+    return "dictionary_path";
+
+  for (v_string *i = vw1.interactions.begin(), *j = vw2.interactions.begin(); i != vw1.interactions.end(); i++, j++)
+    if (v_string2string(*i) != v_string2string(*j))
+      return "interaction mismatch";
+
+  return nullptr;
+}
+}
 // return a copy of string replacing \x00 sequences in it
 string spoof_hex_encoded_namespaces(const string& arg)
 { string res;
@@ -528,7 +606,7 @@ void parse_feature_tweaks(vw& all)
     if (!all.pairs.empty()) all.pairs.clear();
     if (!all.triples.empty()) all.triples.clear();
     if (all.interactions.size() > 0)
-    { for (v_string* i = all.interactions.begin; i != all.interactions.end; ++i) i->delete_v();
+    { for (v_string* i = all.interactions.begin(); i != all.interactions.end(); ++i) i->delete_v();
       all.interactions.delete_v();
     }
   }
@@ -561,7 +639,7 @@ void parse_feature_tweaks(vw& all)
     }
 
     v_array<v_string> exp_cubic = INTERACTIONS::expand_interactions(vec_arg, 3, "error, cubic features must involve three sets.");
-    push_many(expanded_interactions, exp_cubic.begin, exp_cubic.size());
+    push_many(expanded_interactions, exp_cubic.begin(), exp_cubic.size());
     exp_cubic.delete_v();
 
     if (!all.quiet) cerr << endl;
@@ -579,7 +657,7 @@ void parse_feature_tweaks(vw& all)
     }
 
     v_array<v_string> exp_inter = INTERACTIONS::expand_interactions(vec_arg, 0, "");
-    push_many(expanded_interactions, exp_inter.begin, exp_inter.size());
+    push_many(expanded_interactions, exp_inter.begin(), exp_inter.size());
     exp_inter.delete_v();
 
     if (!all.quiet) cerr << endl;
@@ -600,19 +678,19 @@ void parse_feature_tweaks(vw& all)
 
     if (all.interactions.size() > 0)
     { // should be empty, but just in case...
-      for (v_string* i = all.interactions.begin; i != all.interactions.end; ++i) i->delete_v();
+      for (v_string& i : all.interactions) i.delete_v();
       all.interactions.delete_v();
     }
 
     all.interactions = expanded_interactions;
 
     // copy interactions of size 2 and 3 to old vectors for backward compatibility
-    for (v_string* i = expanded_interactions.begin; i != expanded_interactions.end; ++i)
-    { const size_t len = i->size();
+    for (v_string& i : expanded_interactions)
+    { const size_t len = i.size();
       if (len == 2)
-        all.pairs.push_back(v_string2string(*i));
+        all.pairs.push_back(v_string2string(i));
       else if (len == 3)
-        all.triples.push_back(v_string2string(*i));
+        all.triples.push_back(v_string2string(i));
     }
   }
 
@@ -627,6 +705,7 @@ void parse_feature_tweaks(vw& all)
     vector<string> ignore = vm["ignore"].as< vector<string> >();
     for (vector<string>::iterator i = ignore.begin(); i != ignore.end(); i++)
     { *i = spoof_hex_encoded_namespaces(*i);
+      *all.file_options << " --ignore " << *i;
       for (string::const_iterator j = i->begin(); j != i->end(); j++)
         all.ignore[(size_t)(unsigned char)*j] = true;
 
@@ -776,7 +855,7 @@ void parse_example_tweaks(vw& all)
   ("min_prediction", po::value<float>(&(all.sd->min_label)), "Smallest prediction to output")
   ("max_prediction", po::value<float>(&(all.sd->max_label)), "Largest prediction to output")
   ("sort_features", "turn this on to disregard order in which features have been defined. This will lead to smaller cache sizes")
-  ("loss_function", po::value<string>()->default_value("squared"), "Specify the loss function to be used, uses squared by default. Currently available ones are squared, classic, hinge, logistic and quantile.")
+  ("loss_function", po::value<string>()->default_value("squared"), "Specify the loss function to be used, uses squared by default. Currently available ones are squared, classic, hinge, logistic, quantile and poisson.")
   ("quantile_tau", po::value<float>()->default_value(0.5), "Parameter \\tau associated with Quantile loss. Defaults to 0.5")
   ("l1", po::value<float>(&(all.l1_lambda)), "l_1 lambda")
   ("l2", po::value<float>(&(all.l2_lambda)), "l_2 lambda")
@@ -794,7 +873,7 @@ void parse_example_tweaks(vw& all)
   else
     all.training = true;
 
-  if(all.numpasses > 1)
+  if(all.numpasses > 1 || all.holdout_after > 0)
     all.holdout_set_off = false;
 
   if(vm.count("holdout_off"))
@@ -813,7 +892,8 @@ void parse_example_tweaks(vw& all)
   if (vm.count("named_labels"))
   { *all.file_options << " --named_labels " << named_labels << ' ';
     all.sd->ldict = new namedlabels(named_labels);
-    cerr << "parsed " << all.sd->ldict->getK() << " named labels" << endl;
+    if (!all.quiet)
+      cerr << "parsed " << all.sd->ldict->getK() << " named labels" << endl;
   }
 
   string loss_function = vm["loss_function"].as<string>();
@@ -897,7 +977,8 @@ void parse_output_model(vw& all)
   ("save_resume", "save extra state so learning can be resumed later with new data")
   ("save_per_pass", "Save the model after every pass over data")
   ("output_feature_regularizer_binary", po::value< string >(&(all.per_feature_regularizer_output)), "Per feature regularization output file")
-  ("output_feature_regularizer_text", po::value< string >(&(all.per_feature_regularizer_text)), "Per feature regularization output file, in text");
+  ("output_feature_regularizer_text", po::value< string >(&(all.per_feature_regularizer_text)), "Per feature regularization output file, in text")
+  ("id", po::value< string >(&(all.id)), "User supplied ID embedded into the final regressor");
   add_options(all);
 
   po::variables_map& vm = all.vm;
@@ -922,6 +1003,11 @@ void parse_output_model(vw& all)
 
   if (vm.count("save_resume"))
     all.save_resume = true;
+
+  if (vm.count("id") && find(all.args.begin(), all.args.end(), "--id") == all.args.end())
+  { all.args.push_back("--id");
+    all.args.push_back(vm["id"].as<string>());
+  }
 }
 
 void load_input_model(vw& all, io_buf& io_temp)
@@ -968,6 +1054,7 @@ void parse_reductions(vw& all)
   all.reduction_stack.push_back(noop_setup);
   all.reduction_stack.push_back(lda_setup);
   all.reduction_stack.push_back(bfgs_setup);
+  all.reduction_stack.push_back(OjaNewton_setup);
 
   //Score Users
   all.reduction_stack.push_back(ExpReplay::expreplay_setup<'b', simple_label>);
@@ -991,6 +1078,7 @@ void parse_reductions(vw& all)
   all.reduction_stack.push_back(boosting_setup);
   all.reduction_stack.push_back(ect_setup);
   all.reduction_stack.push_back(log_multi_setup);
+  all.reduction_stack.push_back(recall_tree_setup);
   all.reduction_stack.push_back(multilabel_oaa_setup);
 
   all.reduction_stack.push_back(csoaa_setup);
@@ -998,11 +1086,16 @@ void parse_reductions(vw& all)
   all.reduction_stack.push_back(csldf_setup);
   all.reduction_stack.push_back(cb_algs_setup);
   all.reduction_stack.push_back(cb_adf_setup);
+  all.reduction_stack.push_back(mwt_setup);
+  all.reduction_stack.push_back(cb_explore_setup);
+  all.reduction_stack.push_back(cb_explore_adf_setup);
   all.reduction_stack.push_back(cbify_setup);
 
   all.reduction_stack.push_back(ExpReplay::expreplay_setup<'c', COST_SENSITIVE::cs_label>);
   all.reduction_stack.push_back(Search::setup);
   all.reduction_stack.push_back(bs_setup);
+
+  all.reduction_stack.push_back(audit_regressor_setup);
 
   all.l = setup_base(all);
 }
@@ -1230,27 +1323,53 @@ char** get_argv_from_string(string s, int& argc)
   return argv;
 }
 
-vw* initialize(string s)
-{ int argc = 0;
-  s += " --no_stdin";
-  char** argv = get_argv_from_string(s,argc);
-
-  vw& all = parse_args(argc, argv);
-
-  // if parse_args ever throws, this will leak.
-  for (int i = 0; i < argc; i++)
+void free_args(int argc, char* argv[])
+{ for (int i = 0; i < argc; i++)
     free(argv[i]);
   free(argv);
+}
+
+vw* initialize(string s, io_buf* model)
+{
+  int argc = 0;
+  char** argv = get_argv_from_string(s,argc);
+  vw* ret = nullptr;
+  
+  try
+  { ret = initialize(argc, argv, model); }
+  catch(...)
+  { free_args(argc, argv);
+    throw;
+  }
+  
+  free_args(argc, argv);
+  return ret;
+}
+
+vw* initialize(int argc, char* argv[], io_buf* model)
+{ vw& all = parse_args(argc, argv);
 
   try
-  { io_buf model;
-    parse_regressor_args(all, model);
-    parse_modules(all, model);
-    parse_sources(all, model);
+  { // if user doesn't pass in a model, read from arguments
+    io_buf localModel;
+    if (!model)
+    { parse_regressor_args(all, localModel);
+      model = &localModel;
+    }
+
+    parse_modules(all, *model);
+    parse_sources(all, *model);
 
     initialize_parser_datastructures(all);
 
+    all.l->init_driver();
+
     return &all;
+  }
+  catch (std::exception& e)
+  { std::cerr << "Error: " << e.what() << "\n";
+	finish(all);
+	throw;
   }
   catch (...)
   { finish(all);
@@ -1276,6 +1395,9 @@ vw* seed_vw_model(vw* vw_model, const string extra_args)
 
   vw* new_model = VW::initialize(init_args.str().c_str());
 
+  free_it(new_model->reg.weight_vector);
+  free_it(new_model->sd);
+
   // reference model states stored in the specified VW instance
   new_model->reg = vw_model->reg; // regressor
   new_model->sd = vw_model->sd; // shared data
@@ -1285,7 +1407,7 @@ vw* seed_vw_model(vw* vw_model, const string extra_args)
   return new_model;
 }
 
-void delete_dictionary_entry(substring ss, v_array<feature>*A)
+void delete_dictionary_entry(substring ss, features* A)
 { free(ss.begin);
   A->delete_v();
   delete A;
@@ -1309,7 +1431,7 @@ void sync_stats(vw& all)
 }
 
 void finish(vw& all, bool delete_all)
-{ if (!all.quiet)
+{ if (!all.quiet && !all.vm.count("audit_regressor"))
   { cerr.precision(6);
     cerr << endl << "finished run";
     if(all.current_pass == 0)
@@ -1392,7 +1514,7 @@ void finish(vw& all, bool delete_all)
   delete all.all_reduce;
 
   // destroy all interactions and array of them
-  for (v_string* i = all.interactions.begin; i != all.interactions.end; ++i) i->delete_v();
+  for (v_string& i : all.interactions) i.delete_v();
   all.interactions.delete_v();
 
   if (delete_all) delete &all;

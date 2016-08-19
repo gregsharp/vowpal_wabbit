@@ -6,6 +6,8 @@ license as described in the file LICENSE.
 #include "search_sequencetask.h"
 #include "vw.h"
 
+using namespace std;
+
 namespace SequenceTask         { Search::search_task task = { "sequence",          run, initialize, nullptr,   nullptr,  nullptr     }; }
 namespace SequenceSpanTask     { Search::search_task task = { "sequencespan",      run, initialize, finish, setup, takedown }; }
 namespace SequenceTaskCostToGo { Search::search_task task = { "sequence_ctg",      run, initialize, nullptr,   nullptr,  nullptr     }; }
@@ -21,10 +23,11 @@ void initialize(Search::search& sch, size_t& /*num_actions*/, po::variables_map&
                    0);
 }
 
-void run(Search::search& sch, vector<example*>& ec)
-{ for (size_t i=0; i<ec.size(); i++)
+  void run(Search::search& sch, vector<example*>& ec)
+{ Search::predictor P(sch, (ptag)0);
+  for (size_t i=0; i<ec.size(); i++)
   { action oracle     = ec[i]->l.multi.label;
-    size_t prediction = Search::predictor(sch, (ptag)i+1).set_input(*ec[i]).set_oracle(oracle).set_condition_range((ptag)i, sch.get_history_length(), 'p').predict();
+    size_t prediction = P.set_tag((ptag)i+1).set_input(*ec[i]).set_oracle(oracle).set_condition_range((ptag)i, sch.get_history_length(), 'p').predict();
 
     if (sch.output().good())
       sch.output() << sch.pretty_label((uint32_t)prediction) << ' ';
@@ -164,16 +167,16 @@ void takedown(Search::search& sch, vector<example*>& ec)
 void run(Search::search& sch, vector<example*>& ec)
 { task_data& D = *sch.get_task_data<task_data>();
   v_array<action> * y_allowed = &(D.allowed_actions);
-
+  Search::predictor P(sch, (ptag)0);
   for (size_t pass=1; pass<=D.multipass; pass++)
   { action last_prediction = 1;
     for (size_t i=0; i<ec.size(); i++)
     { action oracle = ec[i]->l.multi.label;
       size_t len = y_allowed->size();
-      Search::predictor P(sch, (ptag)i+1);
+      P.set_tag((ptag)i+1);
       P.set_learner_id(pass-1);
       if (D.encoding == BIO)
-      { if      (last_prediction == 1)       P.set_allowed(y_allowed->begin, len-1);
+      { if      (last_prediction == 1)       P.set_allowed(y_allowed->begin(), len-1);
         else if (last_prediction % 2 == 0) { (*y_allowed)[len-1] = last_prediction+1; P.set_allowed(*y_allowed); }
         else                               { (*y_allowed)[len-1] = last_prediction;   P.set_allowed(*y_allowed); }
         if ((oracle > 1) && (oracle % 2 == 1) && (last_prediction != oracle) && (last_prediction != oracle-1))
@@ -221,12 +224,13 @@ void initialize(Search::search& sch, size_t& num_actions, po::variables_map& /*v
 void run(Search::search& sch, vector<example*>& ec)
 { size_t K = * sch.get_task_data<size_t>();
   float*costs = calloc_or_throw<float>(K);
+  Search::predictor P(sch, (ptag)0);
   for (size_t i=0; i<ec.size(); i++)
   { action oracle     = ec[i]->l.multi.label;
     for (size_t k=0; k<K; k++) costs[k] = 1.;
     costs[oracle-1] = 0.;
     size_t prediction =
-      Search::predictor(sch, (ptag)i+1)
+      P.set_tag((ptag)i+1)
       .set_input(*ec[i])
       .set_allowed(nullptr, costs, K)
       .set_condition_range((ptag)i, sch.get_history_length(), 'p')
@@ -338,39 +342,35 @@ void finish(Search::search& sch)
 
 
 // this is totally bogus for the example -- you'd never actually do this!
-void my_update_example_indicies(Search::search& sch, bool audit, example* ec, uint32_t mult_amount, uint32_t plus_amount)
+void my_update_example_indicies(Search::search& sch, bool audit, example* ec, uint64_t mult_amount, uint64_t plus_amount)
 { size_t ss = sch.get_stride_shift();
-  for (unsigned char* i = ec->indices.begin; i != ec->indices.end; i++)
-    for (feature* f = ec->atomics[*i].begin; f != ec->atomics[*i].end; ++f)
-      f->weight_index = (((f->weight_index>>ss) * mult_amount) + plus_amount)<<ss;
-  if (audit)
-    for (unsigned char* i = ec->indices.begin; i != ec->indices.end; i++)
-      if (ec->audit_features[*i].begin != ec->audit_features[*i].end)
-        for (audit_data *f = ec->audit_features[*i].begin; f != ec->audit_features[*i].end; ++f)
-          f->weight_index = (((f->weight_index>>ss) * mult_amount) + plus_amount)<<ss;
+  for (features& fs : *ec)
+    for (feature_index& idx : fs.indicies)
+      idx = (((idx >> ss) * mult_amount) + plus_amount) << ss;
 }
 
 void run(Search::search& sch, vector<example*>& ec)
 { task_data *data = sch.get_task_data<task_data>();
+  Search::predictor P(sch, (ptag)0);
   for (ptag i=0; i<ec.size(); i++)
-  { for (size_t a=0; a<data->num_actions; a++)
+  { for (uint32_t a=0; a<data->num_actions; a++)
     { if (sch.predictNeedsExample())   // we can skip this work if `predict` won't actually use the example data
       { VW::copy_example_data(false, &data->ldf_examples[a], ec[i]);  // copy but leave label alone!
         // now, offset it appropriately for the action id
-        my_update_example_indicies(sch, true, &data->ldf_examples[a], 28904713, 4832917 * (uint32_t)a);
+        my_update_example_indicies(sch, true, &data->ldf_examples[a], 28904713, 4832917 * (uint64_t)a);
       }
 
       // regardless of whether the example is needed or not, the class info is needed
       CS::label& lab = data->ldf_examples[a].l.cs;
       // need to tell search what the action id is, so that it can add history features correctly!
       lab.costs[0].x = 0.;
-      lab.costs[0].class_index = (uint32_t)a+1;
+      lab.costs[0].class_index = a+1;
       lab.costs[0].partial_prediction = 0.;
       lab.costs[0].wap_value = 0.;
     }
 
     action oracle  = ec[i]->l.multi.label - 1;
-    action pred_id = Search::predictor(sch, i+1).set_input(data->ldf_examples, data->num_actions).set_oracle(oracle).set_condition_range(i, sch.get_history_length(), 'p').predict();
+    action pred_id = P.set_tag((ptag)(i+1)).set_input(data->ldf_examples, data->num_actions).set_oracle(oracle).set_condition_range(i, sch.get_history_length(), 'p').predict();
     action prediction = pred_id + 1;  // or ldf_examples[pred_id]->ld.costs[0].weight_index
 
     if (sch.output().good())

@@ -2,6 +2,8 @@
 #include "gd.h"
 #include "vw.h"
 
+using namespace std;
+
 namespace MULTILABEL
 {
 bool is_test_label(labels& ld)
@@ -173,12 +175,13 @@ void output_example(vw& all, example& ec)
       }
     }
     loss += given.label_v.size() - given_index;
+    loss += preds.label_v.size() - preds_index;
   }
 
   all.sd->update(ec.test_only, loss, 1.f, ec.num_features);
 
-  for (int* sink = all.final_prediction_sink.begin; sink != all.final_prediction_sink.end; sink++)
-    print_multilabel(*sink, ec.pred.multilabels, ec.tag);
+  for (int sink : all.final_prediction_sink)
+    print_multilabel(sink, ec.pred.multilabels, ec.tag);
 
   print_update(all, is_test_label(ec.l.multilabels), ec);
 }

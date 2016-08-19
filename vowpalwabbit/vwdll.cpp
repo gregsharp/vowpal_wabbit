@@ -27,6 +27,7 @@
 
 extern "C"
 {
+	using namespace std;
 #ifdef USE_CODECVT
   VW_DLL_MEMBER VW_HANDLE VW_CALLING_CONV VW_Initialize(const char16_t * pstrArgs)
   { std::wstring_convert<std::codecvt_utf8<char16_t>, char16_t> convert;
@@ -47,7 +48,7 @@ extern "C"
     if (pointer->numpasses > 1)
     { adjust_used_index(*pointer);
       pointer->do_reset_source = true;
-      VW::start_parser(*pointer,false);
+      VW::start_parser(*pointer);
       LEARNER::generic_driver(*pointer);
       VW::end_parser(*pointer);
     }
@@ -88,9 +89,9 @@ extern "C"
     return static_cast<VW_EXAMPLE>(VW::read_example(*pointer, const_cast<char*>(line)));
   }
 
-  VW_DLL_MEMBER void VW_CALLING_CONV VW_StartParser(VW_HANDLE handle, bool do_init)
+  VW_DLL_MEMBER void VW_CALLING_CONV VW_StartParser(VW_HANDLE handle)
   { vw * pointer = static_cast<vw*>(handle);
-    VW::start_parser(*pointer, do_init);
+    VW::start_parser(*pointer);
   }
 
   VW_DLL_MEMBER void VW_CALLING_CONV VW_EndParser(VW_HANDLE handle)
@@ -236,11 +237,10 @@ extern "C"
     //which may not be the actual one used (e.g., for cost-sensitive multi-class learning)
     return VW::get_prediction(ex);
   }
-  
+
   VW_DLL_MEMBER float VW_CALLING_CONV VW_PredictCostSensitive(VW_HANDLE handle, VW_EXAMPLE e)
-  {
-    vw * pointer = static_cast(handle);
-    example * ex = static_cast(e);
+  { vw * pointer = static_cast<vw*>(handle);
+    example * ex = static_cast<example*>(e);
     pointer->l->predict(*ex);
     return VW::get_cost_sensitive_prediction(ex);
   }

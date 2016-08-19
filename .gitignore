@@ -56,6 +56,9 @@ library/search_generate
 test/RunTests.last.times
 *.dSYM
 *~
+*.pc
+*.pyc
+.DS_Store
 
 # build folders
 **/x64
@@ -97,13 +100,22 @@ VW.creator.user
 VW.files
 VW.includes
 
-/cs/Serializer/Visitors/VowpalWabbitNativeVisitorExt.cs
-# Python package
-build/**
-dist/**
-pyvw.egg-info/**
-python/pyvw.egg-info/**
+# Python packaging
+python/.cache/**
+python/.eggs/**
+python/.tox/**
+python/build/**
+python/dist/**
+python/src/**
+python/vowpalwabbit.egg-info/**
+python/.coverage
 
 /COPYING
 /README
 /compile
+/cs/Serializer/Visitors/VowpalWabbitNativeVisitorExt.cs
+/cs/Serializer/VowpalWabbitDefaultMarshallerExt.cs
+/cs_unittest/RunTests.cs
+vowpalwabbit/vw.VC.VC.opendb
+vowpalwabbit/vw.VC.db
+/cs/cs/Serializer/VowpalWabbitDefaultMarshallerExt.cs

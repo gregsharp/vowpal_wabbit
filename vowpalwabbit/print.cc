@@ -2,6 +2,7 @@
 #include "float.h"
 #include "reductions.h"
 
+using namespace std;
 struct print { vw* all; }; //regressor, feature loop
 
 void print_feature(vw& all, float value, float& weight)
@@ -25,7 +26,7 @@ void learn(print& p, LEARNER::base_learner&, example& ec)
   }
   if (ec.tag.size() > 0)
   { cout << '\'';
-    cout.write(ec.tag.begin, ec.tag.size());
+    cout.write(ec.tag.begin(), ec.tag.size());
   }
   cout << "| ";
   GD::foreach_feature<vw, print_feature>(*(p.all), ec, *p.all);

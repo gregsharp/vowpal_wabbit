@@ -11,9 +11,19 @@ license as described in the file LICENSE.
 #include "vw_exception.h"
 
 using namespace LEARNER;
+using namespace std;
 
 namespace CB
 {
+  bool is_test_label(CB::label& ld)
+  { if (ld.costs.size() == 0)
+      return true;
+    for (size_t i=0; i<ld.costs.size(); i++)
+      if (FLT_MAX != ld.costs[i].cost && ld.costs[i].probability > 0.)
+	return false;
+    return true;
+  }
+
 char* bufread_label(CB::label* ld, char* c, io_buf& cache)
 { size_t num = *(size_t *)c;
   ld->costs.erase();
@@ -90,7 +100,6 @@ bool substring_eq(substring ss, const char* str)
 
 void parse_label(parser* p, shared_data*, void* v, v_array<substring>& words)
 { CB::label* ld = (CB::label*)v;
-
   for (size_t i = 0; i < words.size(); i++)
   { cb_class f;
     tokenize(':', words[i], p->parse_name);
@@ -157,7 +166,7 @@ bool ec_is_example_header(example& ec)  // example headers just have "shared"
   return false;
 }
 
-void print_update(vw& all, bool is_test, example& ec, v_array<example*>* ec_seq, bool multilabel)
+void print_update(vw& all, bool is_test, example& ec, v_array<example*>* ec_seq, bool action_scores)
 { if (all.sd->weighted_examples >= all.sd->dump_interval && !all.quiet && !all.bfgs)
   { size_t num_features = ec.num_features;
 
@@ -175,10 +184,10 @@ void print_update(vw& all, bool is_test, example& ec, v_array<example*>* ec_seq,
     else
       label_buf = " known";
 
-    if (multilabel)
+    if (action_scores)
     { std::ostringstream pred_buf;
       pred_buf << std::setw(all.sd->col_current_predict) << std::right << std::setfill(' ')
-               << ec.pred.multilabels.label_v[0]<<"...";
+               << ec.pred.a_s[0].action << ":" << ec.pred.a_s[0].score <<"...";
       all.sd->print_update(all.holdout_set_off, all.current_pass, label_buf, pred_buf.str(),
                            num_features, all.progress_add, all.progress_arg);;
     }
@@ -237,11 +246,11 @@ void parse_label(parser* p, shared_data* sd, void* v, v_array<substring>& words)
 
   ld->action = (uint32_t)hashstring(words[0], 0);
 
-  words.begin++;
+  words.begin()++;
 
   CB::parse_label(p, sd, &(ld->event), words);
 
-  words.begin--;
+  words.begin()--;
 }
 
 label_parser cb_eval = {default_label, parse_label,
